@@ -1,4 +1,5 @@
 // ==UserScript==
+// @license      GPL-3.0
 // @name         学习通题目提取器
 // @version      2.0
 // @description  一键提取学习通作业页面题目，支持 TXT/Markdown/Word 试卷导出，附加答案与错题收集
