@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         学习通作业提取器
 // @license      GPL-3.0
-// @version      1.5
+// @version      1.6
 // @description  一键提取学习通作业题目，支持 Word/TXT/MD 导出，答案/错题收集，题目随机打乱，暗色模式，快捷键
 // @author       huilin
 // @icon         http://pan-yz.chaoxing.com/favicon.ico
@@ -288,6 +288,71 @@
   color: #999; font-size: 11px;
 }
 
+/* ===== 历史记录弹窗 ===== */
+#xxt-history-modal {
+  position: fixed; inset: 0; z-index: 100001;
+  background: rgba(0,0,0,0.35);
+  display: flex; align-items: center; justify-content: center;
+  opacity: 0; pointer-events: none;
+  transition: opacity 0.2s ease;
+}
+#xxt-history-modal.open {
+  opacity: 1; pointer-events: auto;
+}
+#xxt-history-modal .xxt-modal-box {
+  background: #fff; border-radius: 14px; width: 400px; max-height: 520px;
+  padding: 24px; box-shadow: 0 8px 32px rgba(0,0,0,0.15);
+  transform: translateY(12px); transition: transform 0.25s ease;
+  display: flex; flex-direction: column;
+}
+#xxt-history-modal.open .xxt-modal-box {
+  transform: translateY(0);
+}
+#xxt-history-modal .xxt-modal-header {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 14px; padding-bottom: 14px;
+  border-bottom: 1px solid #eee; flex-shrink: 0;
+}
+#xxt-history-modal .xxt-modal-header h3 {
+  font-size: 15px; font-weight: 700; color: #222; margin: 0;
+}
+#xxt-history-modal .xxt-modal-close {
+  width: 24px; height: 24px; border: none; background: #f0f0f0;
+  border-radius: 50%; font-size: 15px; color: #999; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  transition: all 0.2s ease;
+}
+#xxt-history-modal .xxt-modal-close:hover { background: #e0e0e0; color: #555; }
+#xxt-history-modal .xxt-history-list {
+  flex: 1; overflow-y: auto;
+}
+#xxt-history-modal .xxt-history-empty {
+  text-align: center; color: #bbb; padding: 40px 0; font-size: 13px;
+}
+#xxt-history-modal .xxt-history-item {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 12px 14px; border-radius: 10px;
+  background: #fafbfc; border: 1px solid #eef0f2;
+  margin-bottom: 8px; transition: background 0.2s;
+  cursor: pointer;
+}
+#xxt-history-modal .xxt-history-item:hover { background: #f0f2f5; }
+#xxt-history-modal .xxt-history-info { flex: 1; min-width: 0; }
+#xxt-history-modal .xxt-history-title {
+  font-size: 13px; font-weight: 600; color: #333;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+#xxt-history-modal .xxt-history-meta {
+  font-size: 11px; color: #999; margin-top: 3px;
+}
+#xxt-history-modal .xxt-history-delete {
+  width: 26px; height: 26px; border: none; background: transparent;
+  border-radius: 50%; cursor: pointer; color: #ccc; font-size: 16px;
+  display: flex; align-items: center; justify-content: center;
+  transition: all 0.2s ease; flex-shrink: 0; margin-left: 8px;
+}
+#xxt-history-modal .xxt-history-delete:hover { background: #fee2e2; color: #ef4444; }
+
 /* ===== 响应式微调 ===== */
 @media screen and (max-height: 700px) {
   #xxt-panel { top: 40px; max-height: 92vh; }
@@ -406,6 +471,28 @@
 [data-xxt-theme="dark"] #xxt-settings-modal .xxt-shortcut-keys {
   color: #89b4fa; background: #1e1e3e;
 }
+
+/* ===== 历史记录弹窗暗色 ===== */
+[data-xxt-theme="dark"] #xxt-history-modal .xxt-modal-box {
+  background: #1e1e2e; box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+}
+[data-xxt-theme="dark"] #xxt-history-modal .xxt-modal-header {
+  border-bottom-color: #313244;
+}
+[data-xxt-theme="dark"] #xxt-history-modal .xxt-modal-header h3 { color: #cdd6f4; }
+[data-xxt-theme="dark"] #xxt-history-modal .xxt-modal-close {
+  background: #313244; color: #a6adc8;
+}
+[data-xxt-theme="dark"] #xxt-history-modal .xxt-modal-close:hover { background: #45475a; color: #cdd6f4; }
+[data-xxt-theme="dark"] #xxt-history-modal .xxt-history-empty { color: #585b70; }
+[data-xxt-theme="dark"] #xxt-history-modal .xxt-history-item {
+  background: #181825; border-color: #313244;
+}
+[data-xxt-theme="dark"] #xxt-history-modal .xxt-history-item:hover { background: #1e1e2e; }
+[data-xxt-theme="dark"] #xxt-history-modal .xxt-history-title { color: #cdd6f4; }
+[data-xxt-theme="dark"] #xxt-history-modal .xxt-history-meta { color: #a6adc8; }
+[data-xxt-theme="dark"] #xxt-history-modal .xxt-history-delete { color: #585b70; }
+[data-xxt-theme="dark"] #xxt-history-modal .xxt-history-delete:hover { background: #450a0a; color: #f87171; }
   `;
   const darkStyle = document.createElement('style');
   darkStyle.textContent = darkCSS;
@@ -467,6 +554,58 @@
       applyTheme('auto');
     }
   });
+
+  // ==================== 历史记录 ====================
+  const HISTORY_KEY = 'xxt_history';
+  const MAX_HISTORY = 10;
+
+  function loadHistory() {
+    try {
+      const raw = localStorage.getItem(HISTORY_KEY);
+      return raw ? JSON.parse(raw) : [];
+    } catch (e) { return []; }
+  }
+
+  function saveHistory(history) {
+    try {
+      localStorage.setItem(HISTORY_KEY, JSON.stringify(history));
+    } catch (e) { /* ignore */ }
+  }
+
+  function addToHistory(extractedData, fmt, withAnswers, withWrong, shuffle, outputText) {
+    const history = loadHistory();
+    let totalQ = 0;
+    for (const qtype of extractedData.typeOrder) {
+      totalQ += (extractedData.results[qtype] || []).length;
+    }
+    const entry = {
+      id: Date.now(),
+      title: extractedData.title || '未命名',
+      date: new Date().toLocaleString('zh-CN'),
+      format: fmt,
+      withAnswers: withAnswers,
+      withWrong: withWrong,
+      shuffle: shuffle,
+      totalQuestions: totalQ,
+      typeOrder: extractedData.typeOrder,
+      results: extractedData.results,
+      wrongCount: extractedData.wrongCount,
+      hasMyAnswer: extractedData.hasMyAnswer,
+      outputText: outputText || ''
+    };
+    // 去重：相同标题+相同格式的旧记录替换
+    const filtered = history.filter(h => !(h.title === entry.title && h.format === entry.format));
+    filtered.unshift(entry);
+    if (filtered.length > MAX_HISTORY) filtered.length = MAX_HISTORY;
+    saveHistory(filtered);
+    return filtered;
+  }
+
+  function deleteHistoryById(id) {
+    const history = loadHistory().filter(h => h.id !== id);
+    saveHistory(history);
+    return history;
+  }
 
   // ==================== 快捷键 ====================
   function formatShortcutLabel(sc) {
@@ -872,10 +1011,10 @@
     }
   }
 
-  async function generateWordBlob(results, typeOrder, title) {
+  async function generateWordBlob(results, typeOrder, title, withAnswers) {
     const { Document, Packer, Paragraph, TextRun, ImageRun,
             AlignmentType, convertMillimetersToTwip,
-            TabStopType } = docx;
+            TabStopType, PageBreak } = docx;
 
     async function buildImageParagraphs(images) {
       const paragraphs = [];
@@ -998,6 +1137,38 @@
       }
     }
 
+    // 答案页
+    if (withAnswers) {
+      // 分页符
+      children.push(new Paragraph({
+        children: [new PageBreak()],
+        spacing: { after: 0 }
+      }));
+      children.push(new Paragraph({
+        children: [new TextRun({ text: '参考答案', font: "宋体", size: 32, bold: true, color: "000000" })],
+        alignment: AlignmentType.CENTER,
+        spacing: { after: 240 }
+      }));
+      let aNum = 0;
+      for (const qtype of typeOrder) {
+        const questions = results[qtype];
+        if (!questions || questions.length === 0) continue;
+        const header = typeHeaders[qtype] || qtype;
+        children.push(new Paragraph({
+          children: [new TextRun({ text: header, font: "宋体", size: 28, bold: true, color: "000000" })],
+          spacing: { after: 120 }
+        }));
+        for (const q of questions) {
+          aNum++;
+          const answer = q.correctAnswer || '（未找到答案）';
+          children.push(new Paragraph({
+            children: [new TextRun({ text: `${aNum}. ${answer}`, font: "宋体", size: 24 })],
+            spacing: { after: 60 }
+          }));
+        }
+      }
+    }
+
     const doc = new Document({
       sections: [{
         properties: {
@@ -1037,6 +1208,9 @@
       <div class="xxt-header">
         <h3>学习通题目提取器</h3>
         <div style="display:flex;align-items:center;gap:4px;">
+          <button class="xxt-settings-btn" id="xxt-historyBtn" title="历史记录">
+            <svg viewBox="0 0 24 24"><path d="M13 3a9 9 0 0 0-9 9H1l3.89 3.89.07.14L9 12H6c0-3.87 3.13-7 7-7s7 3.13 7 7-3.13 7-7 7c-1.93 0-3.68-.79-4.94-2.06l-1.42 1.42A8.954 8.954 0 0 0 13 21a9 9 0 0 0 0-18zm-1 5v5l4.28 2.54.72-1.21-3.5-2.08V8H12z"/></svg>
+          </button>
           <button class="xxt-settings-btn" id="xxt-settingsBtn" title="设置">
             <svg viewBox="0 0 24 24"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.49.49 0 0 0-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 0 0-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.07.62-.07.94s.02.64.07.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/></svg>
           </button>
@@ -1215,16 +1389,140 @@
       }
     });
 
-    // 格式切换时更新文件名，Word 格式隐藏答案/错题选项
+    // ==================== 历史记录弹窗 ====================
+    const historyModal = document.createElement('div');
+    historyModal.id = 'xxt-history-modal';
+    historyModal.innerHTML = `
+      <div class="xxt-modal-box">
+        <div class="xxt-modal-header">
+          <h3>历史记录</h3>
+          <button class="xxt-modal-close" id="xxt-history-close">&times;</button>
+        </div>
+        <div class="xxt-history-list" id="xxt-history-list">
+          <div class="xxt-history-empty">暂无历史记录</div>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(historyModal);
+
+    const historyListEl = historyModal.querySelector('#xxt-history-list');
+    const historyCloseBtn = historyModal.querySelector('#xxt-history-close');
+
+    function renderHistoryList() {
+      const history = loadHistory();
+      if (history.length === 0) {
+        historyListEl.innerHTML = '<div class="xxt-history-empty">暂无历史记录</div>';
+        return;
+      }
+      const fmtNames = { 'txt': 'TXT', 'md': 'MD', 'word': 'Word' };
+      historyListEl.innerHTML = history.map(h => {
+        const flags = [];
+        if (h.withAnswers) flags.push('含答案');
+        if (h.withWrong) flags.push('含错题');
+        if (h.shuffle) flags.push('打乱');
+        const flagStr = flags.length > 0 ? ' · ' + flags.join('、') : '';
+        return `
+          <div class="xxt-history-item" data-id="${h.id}">
+            <div class="xxt-history-info">
+              <div class="xxt-history-title">${escapeHtml(h.title)}</div>
+              <div class="xxt-history-meta">${h.date} · ${h.totalQuestions}题 · ${fmtNames[h.format] || h.format}${flagStr}</div>
+            </div>
+            <button class="xxt-history-delete" data-id="${h.id}" title="删除">✕</button>
+          </div>
+        `;
+      }).join('');
+
+      // 点击历史条目 → 加载
+      historyListEl.querySelectorAll('.xxt-history-item').forEach(item => {
+        item.addEventListener('click', (e) => {
+          if (e.target.closest('.xxt-history-delete')) return;
+          const id = Number(item.dataset.id);
+          const entry = loadHistory().find(h => h.id === id);
+          if (!entry) return;
+          // 恢复提取数据
+          const typeOrder = entry.typeOrder;
+          const results = entry.results;
+          const total = entry.totalQuestions;
+          extractedData = {
+            total, title: entry.title, typeOrder, results,
+            wrongCount: entry.wrongCount, hasMyAnswer: entry.hasMyAnswer,
+            breakdown: Object.fromEntries(Object.entries(results).map(([k, v]) => [k, v.length])),
+            text: formatOutput(results, typeOrder),
+            textWithAnswers: formatOutputWithAnswers(results, typeOrder),
+            textWrong: formatWrongQuestionsTXT(results, typeOrder),
+            textMD: formatOutputMD(results, typeOrder),
+            textWithAnswersMD: formatOutputWithAnswersMD(results, typeOrder),
+            textWrongMD: formatWrongQuestionsMD(results, typeOrder),
+          };
+          // 恢复格式选项
+          const fmtRadio = document.querySelector(`input[name="xxt-fmt"][value="${entry.format}"]`);
+          if (fmtRadio) fmtRadio.checked = true;
+          // 恢复复选框
+          els.chkAnswers.checked = entry.withAnswers;
+          if (els.chkShuffle) els.chkShuffle.checked = entry.shuffle;
+          if (els.chkWrong) els.chkWrong.checked = entry.withWrong;
+          // 根据格式调整 UI
+          const isWord = entry.format === 'word';
+          if (els.wrongToggle) els.wrongToggle.style.display = isWord ? 'none' : '';
+          if (els.wrongHint) els.wrongHint.style.display = isWord ? 'none' : '';
+          if (entry.hasMyAnswer && entry.wrongCount > 0 && !isWord) {
+            els.wrongToggle.classList.remove('xxt-hidden');
+            els.wrongHint.textContent = `检测到 ${entry.wrongCount} 道错题，可勾选附加到输出末尾`;
+            els.wrongHint.classList.remove('xxt-hidden');
+          } else {
+            els.wrongToggle.classList.add('xxt-hidden');
+            els.wrongHint.classList.add('xxt-hidden');
+          }
+          renderStats(els);
+          updateFilename(els);
+          els.result.classList.remove('xxt-hidden');
+          showStatus(els, `已加载历史记录：${entry.title} (${total}题)`, 'ok');
+          historyModal.classList.remove('open');
+          els.btnExtract.textContent = '重新提取';
+        });
+      });
+
+      // 删除按钮
+      historyListEl.querySelectorAll('.xxt-history-delete').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          const id = Number(btn.dataset.id);
+          deleteHistoryById(id);
+          renderHistoryList();
+        });
+      });
+    }
+
+    function escapeHtml(str) {
+      const div = document.createElement('div');
+      div.textContent = str;
+      return div.innerHTML;
+    }
+
+    // 历史记录按钮 → 打开弹窗
+    const historyBtn = document.getElementById('xxt-historyBtn');
+    historyBtn.addEventListener('click', () => {
+      renderHistoryList();
+      historyModal.classList.add('open');
+    });
+    historyCloseBtn.addEventListener('click', () => { historyModal.classList.remove('open'); });
+    historyModal.addEventListener('click', (e) => {
+      if (e.target === historyModal) historyModal.classList.remove('open');
+    });
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && historyModal.classList.contains('open')) {
+        historyModal.classList.remove('open');
+      }
+    });
+
+    // 格式切换时更新文件名，Word 格式隐藏错题选项（答案选项保留）
     panel.addEventListener('change', (e) => {
       if (e.target.name === 'xxt-fmt' && extractedData) {
         updateFilename(els);
         const isWord = getFormat(els) === 'word';
-        const chkAnswers = document.getElementById('xxt-chkAnswers');
         const chkWrong = document.getElementById('xxt-chkWrong');
         const wrongToggle = document.getElementById('xxt-wrong-toggle');
         const wrongHint = document.getElementById('xxt-wrong-hint');
-        if (chkAnswers) chkAnswers.closest('.xxt-toggle').style.display = isWord ? 'none' : '';
         if (wrongToggle) wrongToggle.style.display = isWord ? 'none' : '';
         if (wrongHint) wrongHint.style.display = isWord ? 'none' : '';
       }
@@ -1294,13 +1592,14 @@
           const activeResults = doShuffle
             ? shuffleQuestions(extractedData.results, extractedData.typeOrder)
             : extractedData.results;
-          const blob = await generateWordBlob(activeResults, extractedData.typeOrder, extractedData.title);
+          const blob = await generateWordBlob(activeResults, extractedData.typeOrder, extractedData.title, els.chkAnswers.checked);
           const filename = (els.filename.value || '学习通试卷').replace(/\.(txt|md|docx)$/, '') + '.docx';
           const url = URL.createObjectURL(blob);
           const a = document.createElement('a');
           a.href = url; a.download = filename; a.click();
           URL.revokeObjectURL(url);
-          showStatus(els, 'Word 试卷已下载', 'ok');
+          showStatus(els, 'Word 试卷' + (els.chkAnswers.checked ? '（含答案）' : '') + '已下载', 'ok');
+          addToHistory(extractedData, 'word', els.chkAnswers.checked, false, doShuffle, '');
         } catch (err) {
           showStatus(els, 'Word 导出失败: ' + err.message, 'err');
         }
@@ -1320,6 +1619,7 @@
       a.download = filename.endsWith(ext) ? filename : filename + ext;
       a.click();
       URL.revokeObjectURL(url);
+      addToHistory(extractedData, fmt, els.chkAnswers.checked, els.chkWrong && els.chkWrong.checked, els.chkShuffle && els.chkShuffle.checked, text);
     });
 
     els.btnCopy.addEventListener('click', async () => {
