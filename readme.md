@@ -6,7 +6,7 @@
 
 
 ### 安装
-1. 确保已安装脚本管理器（[脚本猫](https://docs.scriptcat.org/) 或 Tampermonkey）
+1. 确保已安装脚本管理器（[脚本猫](https://docs.scriptcat.org/)）
 2. [点击安装](https://scriptcat.org/zh-CN/script-show-page/6713)
 
 
