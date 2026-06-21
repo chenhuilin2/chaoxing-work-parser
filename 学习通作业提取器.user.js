@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         学习通作业提取器
 // @license      GPL-3.0
-// @version      1.6
+// @version      1.7
 // @description  一键提取学习通作业题目，支持 Word/TXT/MD 导出，答案/错题收集，题目随机打乱，暗色模式，快捷键
 // @author       huilin
 // @icon         http://pan-yz.chaoxing.com/favicon.ico
@@ -744,7 +744,11 @@
     let wrongCount = 0;
 
     const markItems = document.querySelectorAll('.mark_item');
-    if (markItems.length === 0) return { results, typeOrder, wrongCount, hasMyAnswer: false };
+
+    // 新版页面：没有 .mark_item，直接通过 .questionLi 的 typeName 属性提取
+    if (markItems.length === 0) {
+      return extractFromQuestionLi(results, typeOrder);
+    }
 
     let hasAnyMyAnswer = false;
 
@@ -787,6 +791,54 @@
     });
 
     return { results, typeOrder, wrongCount, hasMyAnswer: hasAnyMyAnswer };
+  }
+
+  // 新版本页面提取：无 .mark_item，直接遍历 .questionLi
+  function extractFromQuestionLi(results, typeOrder) {
+    const questionLis = document.querySelectorAll('.questionLi');
+    if (questionLis.length === 0) return { results, typeOrder, wrongCount: 0, hasMyAnswer: false };
+
+    questionLis.forEach(qLi => {
+      // 从 typeName 属性获取题型
+      const typeName = qLi.getAttribute('typeName') || '';
+      const sectionType = detectTypeFromText(typeName);
+      if (!sectionType) return;
+
+      if (!typeOrder.includes(sectionType)) typeOrder.push(sectionType);
+
+      // 从 h3.mark_name 提取题干
+      const markName = qLi.querySelector('.mark_name');
+      if (!markName) return;
+      let stem = markName.textContent.trim();
+      if (!stem) return;
+      // 去掉前面的题号和题型标签，如 "1. (单选题) " 或 "37. (填空题) "
+      stem = stem.replace(/^\d+\.\s*/, '').replace(/^\([^)]+\)\s*/, '').trim();
+      if (!stem) return;
+
+      // 提取题目中的图片
+      const images = extractImagesFromElement(markName);
+
+      // 从 .answerBg 提取选项
+      const options = [];
+      const answerBgs = qLi.querySelectorAll('.answerBg');
+      answerBgs.forEach(bg => {
+        const numOption = bg.querySelector('.num_option');
+        const answerP = bg.querySelector('.answer_p');
+        if (numOption && answerP) {
+          const letter = numOption.getAttribute('data') || numOption.textContent.trim();
+          const text = answerP.textContent.trim();
+          if (letter && text) options.push({ letter, text });
+        }
+      });
+
+      // 新版本页面无正确答案/我的答案
+      results[sectionType].push({
+        stem, options, images,
+        correctAnswer: '', myAnswer: '', isWrong: false
+      });
+    });
+
+    return { results, typeOrder, wrongCount: 0, hasMyAnswer: false };
   }
 
   // ==================== TXT 格式化 ====================
