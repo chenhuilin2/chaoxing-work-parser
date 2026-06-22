@@ -968,16 +968,16 @@
     output += '              错题汇总\n';
     output += '========================================\n\n';
 
-    let wrongNum = 0;
+    let globalNum = 0;
     for (const qtype of typeOrder) {
       const questions = results[qtype];
       if (!questions || questions.length === 0) continue;
-      if (qtype === '简答') continue; // 简答题不算错题
+      if (qtype === '简答') { globalNum += questions.length; continue; }
       for (const q of questions) {
+        globalNum++;
         if (!q.isWrong) continue;
-        wrongNum++;
         const typeLabel = qtype === '填空' ? '填空题' : '题目';
-        output += `${wrongNum}. (${typeLabel})${q.stem}${formatImagesForText(q.images)}\n`;
+        output += `${globalNum}. (${typeLabel})${q.stem}${formatImagesForText(q.images)}\n`;
         output += `   我的答案: ${q.myAnswer || '无'}\n`;
         output += `   正确答案: ${q.correctAnswer || '（未找到答案）'}\n\n`;
       }
@@ -1059,15 +1059,15 @@
     let output = '\n\n\n---\n\n';
     output += '## 错题汇总\n\n';
 
-    let wrongNum = 0;
+    let globalNum = 0;
     for (const qtype of typeOrder) {
       const questions = results[qtype];
       if (!questions || questions.length === 0) continue;
-      if (qtype === '简答') continue; // 简答题不算错题
+      if (qtype === '简答') { globalNum += questions.length; continue; }
       for (const q of questions) {
+        globalNum++;
         if (!q.isWrong) continue;
-        wrongNum++;
-        output += `**${wrongNum}.** ${q.stem}${formatImagesForMD(q.images)}\n\n`;
+        output += `**${globalNum}.** ${q.stem}${formatImagesForMD(q.images)}\n\n`;
         output += `- 我的答案: ${q.myAnswer || '无'}\n`;
         output += `- 正确答案: ${q.correctAnswer || '（未找到答案）'}\n\n`;
       }
@@ -1102,7 +1102,7 @@
     }
   }
 
-  async function generateWordBlob(results, typeOrder, title, withAnswers, bankImport) {
+  async function generateWordBlob(results, typeOrder, title, withAnswers, withWrong, bankImport) {
     const { Document, Packer, Paragraph, TextRun, ImageRun,
             AlignmentType, convertMillimetersToTwip,
             TabStopType, PageBreak } = docx;
@@ -1344,6 +1344,77 @@
             children: [new TextRun({ text: `${aNum}. ${answer}`, font: "宋体", size: 24 })],
             spacing: { after: 60 }
           }));
+        }
+      }
+    }
+
+    // 错题汇总（Word 试卷）—— 保留原题号
+    if (withWrong) {
+      let hasWrong = false;
+      for (const qtype of typeOrder) {
+        const questions = results[qtype];
+        if (!questions) continue;
+        for (const q of questions) {
+          if (q.isWrong) { hasWrong = true; break; }
+        }
+        if (hasWrong) break;
+      }
+
+      if (hasWrong) {
+        children.push(new Paragraph({
+          children: [new PageBreak()],
+          spacing: { after: 0 }
+        }));
+        children.push(new Paragraph({
+          children: [new TextRun({ text: '错题汇总', font: "宋体", size: 32, bold: true, color: "000000" })],
+          alignment: AlignmentType.CENTER,
+          spacing: { after: 240 }
+        }));
+
+        let globalNum = 0;
+        for (const qtype of typeOrder) {
+          const questions = results[qtype];
+          if (!questions || questions.length === 0) continue;
+          if (qtype === '简答') { globalNum += questions.length; continue; }
+
+          const header = typeHeaders[qtype] || qtype;
+          let sectionHasWrong = false;
+          for (const q of questions) {
+            if (q.isWrong) { sectionHasWrong = true; break; }
+          }
+          if (!sectionHasWrong) { globalNum += questions.length; continue; }
+
+          children.push(new Paragraph({
+            children: [new TextRun({ text: header, font: "宋体", size: 28, bold: true, color: "000000" })],
+            spacing: { after: 120 }
+          }));
+
+          for (const q of questions) {
+            globalNum++;
+            if (!q.isWrong) continue;
+            children.push(new Paragraph({
+              children: [new TextRun({ text: `${globalNum}. ${normalizeStem(q.stem)}`, font: "宋体", size: 24 })],
+              spacing: { after: 40 }
+            }));
+            // 选项
+            const options = q.options || [];
+            if (options.length > 0) {
+              for (const opt of options) {
+                children.push(new Paragraph({
+                  children: [new TextRun({ text: `${opt.letter}. ${opt.text}`, font: "宋体", size: 24 })],
+                  spacing: { after: 40 }
+                }));
+              }
+            }
+            children.push(new Paragraph({
+              children: [new TextRun({ text: `我的答案: ${q.myAnswer || '无'}`, font: "宋体", size: 24, color: "DC2626" })],
+              spacing: { after: 40 }
+            }));
+            children.push(new Paragraph({
+              children: [new TextRun({ text: `正确答案: ${q.correctAnswer || '（未找到答案）'}`, font: "宋体", size: 24, color: "16A34A" })],
+              spacing: { after: 120 }
+            }));
+          }
         }
       }
     }
@@ -1722,7 +1793,7 @@
             shuffleToggle.classList.toggle('xxt-disabled', isBankImport);
             if (shuffleToggle.querySelector('input')) shuffleToggle.querySelector('input').disabled = isBankImport;
           }
-          if (entry.hasMyAnswer && entry.wrongCount > 0 && !isWord) {
+          if (entry.hasMyAnswer && entry.wrongCount > 0) {
             els.wrongToggle.classList.remove('xxt-hidden');
             els.wrongHint.textContent = `检测到 ${entry.wrongCount} 道错题，可勾选附加到输出末尾`;
             els.wrongHint.classList.remove('xxt-hidden');
@@ -1772,16 +1843,12 @@
       }
     });
 
-    // 格式/选项切换时更新文件名，Word 格式隐藏错题选项
+    // 格式/选项切换时更新文件名
     panel.addEventListener('change', (e) => {
       if (!extractedData) return;
       if (e.target.name === 'xxt-fmt') {
         updateFilename(els);
         const isWord = getFormat(els) === 'word';
-        const wrongToggle = document.getElementById('xxt-wrong-toggle');
-        const wrongHint = document.getElementById('xxt-wrong-hint');
-        if (wrongToggle) wrongToggle.style.display = isWord ? 'none' : '';
-        if (wrongHint) wrongHint.style.display = isWord ? 'none' : '';
         // 题库导入格式选项仅在 Word 格式下显示
         if (els.bankImportToggle) els.bankImportToggle.style.display = isWord ? '' : 'none';
         if (!isWord && els.chkBankImport) els.chkBankImport.checked = false;
@@ -1874,17 +1941,18 @@
           const isBankImport = els.chkBankImport && els.chkBankImport.checked;
           // 题库导入格式：不打乱、始终含答案
           const doShuffle = !isBankImport && els.chkShuffle && els.chkShuffle.checked;
+          const withWrong = !isBankImport && els.chkWrong && els.chkWrong.checked;
           const activeResults = doShuffle
             ? shuffleQuestions(extractedData.results, extractedData.typeOrder)
             : extractedData.results;
-          const blob = await generateWordBlob(activeResults, extractedData.typeOrder, extractedData.title, isBankImport || els.chkAnswers.checked, isBankImport);
+          const blob = await generateWordBlob(activeResults, extractedData.typeOrder, extractedData.title, isBankImport || els.chkAnswers.checked, withWrong, isBankImport);
           const filename = (els.filename.value || '学习通试卷').replace(/\.(txt|md|docx)$/, '') + '.docx';
           const url = URL.createObjectURL(blob);
           const a = document.createElement('a');
           a.href = url; a.download = filename; a.click();
           URL.revokeObjectURL(url);
-          showStatus(els, isBankImport ? '题库导入格式已下载' : 'Word 试卷' + (els.chkAnswers.checked ? '（含答案）' : '') + '已下载', 'ok');
-          addToHistory(extractedData, 'word', isBankImport || els.chkAnswers.checked, false, doShuffle, isBankImport, '');
+          showStatus(els, isBankImport ? '题库导入格式已下载' : 'Word 试卷' + (els.chkAnswers.checked ? '（含答案）' : '') + (withWrong ? '（含错题）' : '') + '已下载', 'ok');
+          addToHistory(extractedData, 'word', isBankImport || els.chkAnswers.checked, withWrong, doShuffle, isBankImport, '');
         } catch (err) {
           showStatus(els, 'Word 导出失败: ' + err.message, 'err');
         }
