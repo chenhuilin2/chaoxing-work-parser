@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         学习通作业提取器
 // @license      GPL-3.0
-// @version      1.7
+// @version      1.8.0
 // @description  一键提取学习通作业题目，支持 Word/TXT/MD 导出，答案/错题收集，题目随机打乱，暗色模式，快捷键
 // @author       huilin
 // @icon         http://pan-yz.chaoxing.com/favicon.ico
@@ -184,6 +184,10 @@
 }
 #xxt-panel .xxt-toggle span {
   font-size: 12.5px; color: #444; line-height: 1.5; font-weight: 500;
+}
+/* 题库导入勾选时禁用打乱/答案选项，不隐藏 */
+#xxt-panel .xxt-toggle.xxt-disabled {
+  opacity: 0.45; pointer-events: none; user-select: none;
 }
 
 /* ===== 错题提示 ===== */
@@ -580,7 +584,7 @@
     } catch (e) { /* ignore */ }
   }
 
-  function addToHistory(extractedData, fmt, withAnswers, withWrong, shuffle, outputText) {
+  function addToHistory(extractedData, fmt, withAnswers, withWrong, shuffle, bankImport, outputText) {
     const history = loadHistory();
     let totalQ = 0;
     for (const qtype of extractedData.typeOrder) {
@@ -594,6 +598,7 @@
       withAnswers: withAnswers,
       withWrong: withWrong,
       shuffle: shuffle,
+      bankImport: bankImport || false,
       totalQuestions: totalQ,
       typeOrder: extractedData.typeOrder,
       results: extractedData.results,
@@ -1075,6 +1080,11 @@
     return stem.replace(/\(\s{3,}\)/g, '(   )');
   }
 
+  // 题库导入格式：将题干中的宽括号归一化为（ ）
+  function normalizeStemForBank(stem) {
+    return stem.replace(/\(\s{2,}\)/g, '（ ）').replace(/（\s{2,}）/g, '（ ）');
+  }
+
   async function fetchImageAsBase64(url) {
     try {
       const resp = await fetch(url, { mode: 'cors' });
@@ -1092,7 +1102,7 @@
     }
   }
 
-  async function generateWordBlob(results, typeOrder, title, withAnswers) {
+  async function generateWordBlob(results, typeOrder, title, withAnswers, bankImport) {
     const { Document, Packer, Paragraph, TextRun, ImageRun,
             AlignmentType, convertMillimetersToTwip,
             TabStopType, PageBreak } = docx;
@@ -1126,6 +1136,94 @@
       '填空': '三、填空题', '判断': '四、判断题',
       '简答': '五、简答题',
     };
+
+    // 题库导入格式标签
+    const bankTypeLabels = {
+      '单选': '【单选题】', '多选': '【多选题】', '填空': '【填空题】',
+      '判断': '【判断题】', '简答': '【简答题】',
+    };
+
+    // 题库导入格式：生成学习通智能导入兼容的 Word 文档
+    if (bankImport) {
+      const children = [];
+      children.push(new Paragraph({
+        children: [new TextRun({ text: title || '题库导入', font: "宋体", size: 32, bold: true, color: "000000" })],
+        alignment: AlignmentType.CENTER,
+        spacing: { after: 240 }
+      }))
+
+      let qNum = 0;
+
+      for (const qtype of typeOrder) {
+        const questions = results[qtype];
+        if (!questions || questions.length === 0) continue;
+
+        const prefix = bankTypeLabels[qtype];
+
+        for (const q of questions) {
+          qNum++;
+          // 题干（题号 + 题型标签 + 题干内容），括号归一化
+          const stem = normalizeStemForBank(q.stem);
+          children.push(new Paragraph({
+            children: [new TextRun({ text: `${qNum}.${prefix}${stem}`, font: "宋体", size: 24 })],
+            spacing: { after: 40 }
+          }));
+          children.push(...await buildImageParagraphs(q.images));
+
+          // 选项
+          const options = q.options || [];
+          for (const opt of options) {
+            children.push(new Paragraph({
+              children: [new TextRun({ text: `${opt.letter}. ${opt.text}`, font: "宋体", size: 24 })],
+              spacing: { after: 40 }
+            }));
+          }
+
+          // 答案
+          const answer = (q.correctAnswer || '').trim();
+          if (answer) {
+            let formattedAnswer = answer;
+            if (qtype === '多选') {
+              const parts = answer.replace(/\s+/g, '').split('');
+              formattedAnswer = parts.join('，');
+            } else if (qtype === '判断') {
+              if (/^[√✓Tt]|正确|True|TRUE/.test(answer)) {
+                formattedAnswer = '对';
+              } else {
+                formattedAnswer = '错';
+              }
+            }
+            children.push(new Paragraph({
+              children: [new TextRun({ text: `答案：${formattedAnswer}`, font: "宋体", size: 24 })],
+              spacing: { after: 120 }
+            }));
+          } else {
+            children.push(new Paragraph({
+              children: [new TextRun({ text: '', font: "宋体", size: 24 })],
+              spacing: { after: 120 }
+            }));
+          }
+        }
+      }
+
+      const doc = new Document({
+        sections: [{
+          properties: {
+            page: {
+              margin: {
+                top: convertMillimetersToTwip(20),
+                bottom: convertMillimetersToTwip(20),
+                left: convertMillimetersToTwip(25),
+                right: convertMillimetersToTwip(25)
+              }
+            }
+          },
+          children
+        }]
+      });
+
+      return await Packer.toBlob(doc);
+    }
 
     const children = [];
 
@@ -1311,7 +1409,7 @@
             <label><input type="radio" name="xxt-fmt" value="md"> MD</label>
           </div>
         </div>
-        <label class="xxt-toggle">
+        <label class="xxt-toggle" id="xxt-ans-toggle">
           <input type="checkbox" id="xxt-chkAnswers">
           <div class="xxt-checkbox-wrap"></div>
           <span>附加答案</span>
@@ -1325,6 +1423,11 @@
           <input type="checkbox" id="xxt-chkShuffle">
           <div class="xxt-checkbox-wrap"></div>
           <span>打乱题目顺序</span>
+        </label>
+        <label class="xxt-toggle" id="xxt-bank-import-toggle">
+          <input type="checkbox" id="xxt-chkBankImport">
+          <div class="xxt-checkbox-wrap"></div>
+          <span>题库导入格式（学习通智能导入兼容）</span>
         </label>
         <div class="xxt-actions">
           <button id="xxt-btnDownload" class="xxt-btn xxt-btn-outline">&#8681; 下载</button>
@@ -1350,6 +1453,8 @@
       wrongToggle: $('xxt-wrong-toggle'),
       wrongHint: $('xxt-wrong-hint'),
       chkShuffle: $('xxt-chkShuffle'),
+      chkBankImport: $('xxt-chkBankImport'),
+      bankImportToggle: $('xxt-bank-import-toggle'),
       closeBtn: $('xxt-closeBtn'),
     };
 
@@ -1556,6 +1661,7 @@
         if (h.withAnswers) flags.push('含答案');
         if (h.withWrong) flags.push('含错题');
         if (h.shuffle) flags.push('打乱');
+        if (h.bankImport) flags.push('题库导入');
         const flagStr = flags.length > 0 ? ' · ' + flags.join('、') : '';
         return `
           <div class="xxt-history-item" data-id="${h.id}">
@@ -1597,10 +1703,25 @@
           els.chkAnswers.checked = entry.withAnswers;
           if (els.chkShuffle) els.chkShuffle.checked = entry.shuffle;
           if (els.chkWrong) els.chkWrong.checked = entry.withWrong;
+          if (els.chkBankImport) els.chkBankImport.checked = entry.bankImport || false;
           // 根据格式调整 UI
           const isWord = entry.format === 'word';
           if (els.wrongToggle) els.wrongToggle.style.display = isWord ? 'none' : '';
           if (els.wrongHint) els.wrongHint.style.display = isWord ? 'none' : '';
+          // 题库导入格式选项仅在 Word 格式下显示
+          if (els.bankImportToggle) els.bankImportToggle.style.display = isWord ? '' : 'none';
+          // 题库导入格式：勾选时禁用打乱和答案选项（不隐藏，维持高度稳定）
+          const isBankImport = entry.bankImport || false;
+          const ansToggle = document.getElementById('xxt-ans-toggle');
+          const shuffleToggle = document.getElementById('xxt-shuffle-toggle');
+          if (ansToggle) {
+            ansToggle.classList.toggle('xxt-disabled', isBankImport);
+            if (ansToggle.querySelector('input')) ansToggle.querySelector('input').disabled = isBankImport;
+          }
+          if (shuffleToggle) {
+            shuffleToggle.classList.toggle('xxt-disabled', isBankImport);
+            if (shuffleToggle.querySelector('input')) shuffleToggle.querySelector('input').disabled = isBankImport;
+          }
           if (entry.hasMyAnswer && entry.wrongCount > 0 && !isWord) {
             els.wrongToggle.classList.remove('xxt-hidden');
             els.wrongHint.textContent = `检测到 ${entry.wrongCount} 道错题，可勾选附加到输出末尾`;
@@ -1657,11 +1778,32 @@
       if (e.target.name === 'xxt-fmt') {
         updateFilename(els);
         const isWord = getFormat(els) === 'word';
-        const chkWrong = document.getElementById('xxt-chkWrong');
         const wrongToggle = document.getElementById('xxt-wrong-toggle');
         const wrongHint = document.getElementById('xxt-wrong-hint');
         if (wrongToggle) wrongToggle.style.display = isWord ? 'none' : '';
         if (wrongHint) wrongHint.style.display = isWord ? 'none' : '';
+        // 题库导入格式选项仅在 Word 格式下显示
+        if (els.bankImportToggle) els.bankImportToggle.style.display = isWord ? '' : 'none';
+        if (!isWord && els.chkBankImport) els.chkBankImport.checked = false;
+      }
+      // 题库导入格式切换：勾选时禁用打乱和答案选项（不隐藏，维持高度稳定）
+      if (e.target === els.chkBankImport) {
+        updateFilename(els);
+        const checked = els.chkBankImport.checked;
+        const ansToggle = document.getElementById('xxt-ans-toggle');
+        const shuffleToggle = document.getElementById('xxt-shuffle-toggle');
+        if (ansToggle) {
+          ansToggle.classList.toggle('xxt-disabled', checked);
+          if (ansToggle.querySelector('input')) ansToggle.querySelector('input').disabled = checked;
+        }
+        if (shuffleToggle) {
+          shuffleToggle.classList.toggle('xxt-disabled', checked);
+          if (shuffleToggle.querySelector('input')) shuffleToggle.querySelector('input').disabled = checked;
+        }
+        if (checked) {
+          if (els.chkAnswers) els.chkAnswers.checked = false;
+          if (els.chkShuffle) els.chkShuffle.checked = false;
+        }
       }
       // 勾选/取消附加答案时更新文件名
       if (e.target === els.chkAnswers) {
@@ -1729,18 +1871,20 @@
         els.btnDownload.disabled = true;
         els.btnDownload.textContent = '生成中...';
         try {
-          const doShuffle = els.chkShuffle && els.chkShuffle.checked;
+          const isBankImport = els.chkBankImport && els.chkBankImport.checked;
+          // 题库导入格式：不打乱、始终含答案
+          const doShuffle = !isBankImport && els.chkShuffle && els.chkShuffle.checked;
           const activeResults = doShuffle
             ? shuffleQuestions(extractedData.results, extractedData.typeOrder)
             : extractedData.results;
-          const blob = await generateWordBlob(activeResults, extractedData.typeOrder, extractedData.title, els.chkAnswers.checked);
+          const blob = await generateWordBlob(activeResults, extractedData.typeOrder, extractedData.title, isBankImport || els.chkAnswers.checked, isBankImport);
           const filename = (els.filename.value || '学习通试卷').replace(/\.(txt|md|docx)$/, '') + '.docx';
           const url = URL.createObjectURL(blob);
           const a = document.createElement('a');
           a.href = url; a.download = filename; a.click();
           URL.revokeObjectURL(url);
-          showStatus(els, 'Word 试卷' + (els.chkAnswers.checked ? '（含答案）' : '') + '已下载', 'ok');
-          addToHistory(extractedData, 'word', els.chkAnswers.checked, false, doShuffle, '');
+          showStatus(els, isBankImport ? '题库导入格式已下载' : 'Word 试卷' + (els.chkAnswers.checked ? '（含答案）' : '') + '已下载', 'ok');
+          addToHistory(extractedData, 'word', isBankImport || els.chkAnswers.checked, false, doShuffle, isBankImport, '');
         } catch (err) {
           showStatus(els, 'Word 导出失败: ' + err.message, 'err');
         }
@@ -1760,7 +1904,7 @@
       a.download = filename.endsWith(ext) ? filename : filename + ext;
       a.click();
       URL.revokeObjectURL(url);
-      addToHistory(extractedData, fmt, els.chkAnswers.checked, els.chkWrong && els.chkWrong.checked, els.chkShuffle && els.chkShuffle.checked, text);
+      addToHistory(extractedData, fmt, els.chkAnswers.checked, els.chkWrong && els.chkWrong.checked, els.chkShuffle && els.chkShuffle.checked, false, text);
     });
 
     els.btnCopy.addEventListener('click', async () => {
@@ -1833,8 +1977,9 @@
     const cleanTitle = title.replace(/[\\/:*?"<>|]/g, '_').substring(0, 60);
     const fmt = getFormat(els);
     const ext = fmt === 'md' ? '.md' : fmt === 'word' ? '.docx' : '.txt';
-    // 勾选附加答案时文件名追加"（含答案）"
-    const suffix = els.chkAnswers.checked ? '（含答案）' : '';
+    // 题库导入格式用"（题库导入）"后缀，附加答案用"（含答案）"
+    const isBankImport = els.chkBankImport && els.chkBankImport.checked;
+    const suffix = isBankImport ? '（题库导入）' : (els.chkAnswers.checked ? '（含答案）' : '');
     els.filename.value = cleanTitle + suffix + ext;
     els.filename.classList.remove('xxt-hidden');
   }
