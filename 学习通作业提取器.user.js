@@ -1,12 +1,13 @@
 // ==UserScript==
 // @name         学习通作业提取器
 // @license      GPL-3.0
-// @version      1.8.0
-// @description  一键提取学习通作业题目，支持 Word/TXT/MD 导出，答案/错题收集，题目随机打乱，暗色模式，快捷键
+// @version      1.9.0
+// @description  一键提取学习通作业题目，支持富文本（图文混排），Word/TXT/MD 导出，答案/错题收集，题库导入格式，暗色模式，快捷键
 // @author       huilin
 // @icon         http://pan-yz.chaoxing.com/favicon.ico
 // @match        *://*.chaoxing.com/*
 // @match        *://*.edu.cn/*
+// @noframes
 // @require      https://unpkg.com/docx@8.5.0/build/index.umd.js
 // @grant        none
 // ==/UserScript==
@@ -691,14 +692,11 @@
     return null;
   }
 
-  function cleanHtml(html) {
-    const div = document.createElement('div');
-    div.innerHTML = html;
-    return div.textContent || div.innerText || '';
-  }
-
+  // ==================== 富文本提取基础设施 ====================
+  // 块级标签：遍历子节点后自动追加换行，保证图文混排时段落结构正确
   const RICH_BLOCK_TAGS = new Set(['P', 'DIV', 'LI', 'DD', 'DT', 'TR', 'TABLE', 'SECTION']);
 
+  // 多属性 fallback 解析图片 URL，兼容学习通各种图片加载方式
   function resolveImageUrl(img) {
     if (!img) return '';
     const attrs = ['src', 'data-src', 'data-original', 'origin-src', 'fileid'];
@@ -709,6 +707,7 @@
     return img.currentSrc || img.src || '';
   }
 
+  // 规范化富文本数组：合并相邻文本节点、去首尾空行、压缩空白
   function normalizeRichContent(parts) {
     const normalized = [];
     const pushText = (text) => {
@@ -740,6 +739,7 @@
     return normalized;
   }
 
+  // 按 DOM 顺序提取富文本内容：保留文字、图片和换行的原始顺序
   function extractRichContent(el) {
     const parts = [];
     if (!el) return parts;
@@ -773,6 +773,7 @@
     return normalizeRichContent(parts);
   }
 
+  // 将富文本数组转为纯文本，图片通过回调格式化
   function richContentToText(content, imageFormatter) {
     let text = '';
     for (const part of content || []) {
@@ -783,6 +784,7 @@
     return text.replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
   }
 
+  // 从富文本首段剥离选项字母（A~H），返回字母和剩余内容
   function stripOptionPrefix(content) {
     const parts = (content || []).map(part => part.type === 'text' ? { ...part } : part);
     let letter = '';
@@ -799,12 +801,14 @@
     return { letter, content: normalizeRichContent(parts) };
   }
 
+  // 剥离题干前缀：题号（如"1."）和题型标签（如"（单选题）"）
   function stripQuestionPrefix(content) {
     const parts = (content || []).map(part => part.type === 'text' ? { ...part } : part);
     let strippedNumber = false;
     let strippedType = false;
     for (const part of parts) {
       if (part.type !== 'text') continue;
+      // 去除末尾的分数标记，如 (2.0)
       part.text = part.text.replace(/\s*\(\d+\.\d+\)\s*$/, '');
       if (!strippedNumber) {
         const before = part.text;
@@ -813,13 +817,15 @@
       }
       if (!strippedType) {
         const before = part.text;
-        part.text = part.text.replace(/^\s*\([^)]+\)\s*/, '');
+        // 只剥离已知题型标签，避免误伤选项字母
+        part.text = part.text.replace(/^\s*（(单选题|多选题|填空题|判断题|简答题|论述题|问答题|选择题)）\s*/, '');
         if (part.text !== before || part.text.trim()) strippedType = true;
       }
     }
     return normalizeRichContent(parts);
   }
 
+  // 剥离答案标签前缀（如"正确答案："）
   function stripAnswerLabel(content) {
     const parts = (content || []).map(part => part.type === 'text' ? { ...part } : part);
     for (const part of parts) {
@@ -831,12 +837,25 @@
     return normalizeRichContent(parts);
   }
 
+  // 判断富文本是否有实质内容（文本或图片）
   function hasRichContent(content) {
     return (content || []).some(part => part.type === 'image' || (part.type === 'text' && part.text.trim()));
   }
 
+  // 提取正确答案为富文本数组，保留图片和公式
   function extractCorrectAnswerContent(qLi) {
     const markAnswer = qLi.querySelector('.mark_answer');
+    if (!markAnswer) return [];
+
+    const contents = [];
+    markAnswer.querySelectorAll('.rightAnswerContent').forEach(el => {
+      const content = stripAnswerLabel(extractRichContent(el));
+      if (hasRichContent(content)) {
+        if (contents.length > 0) contents.push({ type: 'text', text: '；' });
+        contents.push(...content);
+      }
+    });
+    if (contents.length > 0) return normalizeRichContent(contents);
     if (!markAnswer) return [];
 
     const contents = [];
@@ -851,6 +870,11 @@
 
     const markKey = markAnswer.querySelector('.mark_key');
     if (markKey) {
+      const rightEl = markKey.querySelector('.colorGreen');
+      if (rightEl) {
+        const content = stripAnswerLabel(extractRichContent(rightEl));
+        if (hasRichContent(content)) return content;
+      }
       const rightEl = markKey.querySelector('.colorGreen');
       if (rightEl) {
         const content = stripAnswerLabel(extractRichContent(rightEl));
@@ -872,7 +896,7 @@
       if (fillContents.length > 0) return normalizeRichContent(fillContents);
     }
 
-    const fallbackSelectors = ['[class*="rightAnswer"]', '.mark_key .colorGreen', '.mark_fill.colorGreen'];
+    const fallbackSelectors = ['.mark_key .colorGreen', '.mark_fill.colorGreen'];
     for (const selector of fallbackSelectors) {
       const el = markAnswer.querySelector(selector);
       if (!el) continue;
@@ -888,6 +912,7 @@
     return richContentToText(extractCorrectAnswerContent(qLi), () => '').replace(/\s+/g, ' ').trim();
   }
 
+  // 适配器：兼容新旧数据格式，统一返回富文本数组
   function questionContent(q) {
     if (hasRichContent(q.stemContent)) return q.stemContent;
     const parts = q.stem ? [{ type: 'text', text: q.stem }] : [];
@@ -907,14 +932,17 @@
     return q.correctAnswer ? [{ type: 'text', text: q.correctAnswer }] : [];
   }
 
+  // Markdown URL 转义，防止特殊字符破坏图片语法
   function escapeMarkdownAlt(text) {
     return (text || '图片').replace(/[\[\]\n\r]/g, ' ').trim() || '图片';
   }
 
   function escapeMarkdownUrl(url) {
-    return (url || '').replace(/\)/g, '%29').replace(/\(/g, '%28');
+    // 编码 URL 中的特殊字符，防止破坏 Markdown 图片语法，保留已编码部分
+    return (url || '').replace(/[()\\]/g, (ch) => '%' + ch.charCodeAt(0).toString(16).toUpperCase());
   }
 
+  // 富文本格式化：TXT/MD 分别处理
   function formatRichForText(content) {
     return richContentToText(content, (url) => `\n[图片: ${url}]\n`);
   }
@@ -923,10 +951,12 @@
     return richContentToText(content, (url, part) => `\n![${escapeMarkdownAlt(part.alt)}](${escapeMarkdownUrl(url)})\n`);
   }
 
+  // 富文本转纯文本（忽略图片）
   function richTextOnly(content) {
     return richContentToText(content || [], () => '').replace(/\s+/g, ' ').trim();
   }
 
+  // 从旧版 li 元素提取选项（富文本）
   function extractOptionFromLegacyLi(li, index) {
     const parsed = stripOptionPrefix(extractRichContent(li));
     const letter = parsed.letter || String.fromCharCode(65 + index);
@@ -937,6 +967,7 @@
     return null;
   }
 
+  // 从新版 .answerBg 元素提取选项（富文本）
   function extractOptionFromAnswerBg(bg, index) {
     const numOption = bg.querySelector('.num_option');
     const answerP = bg.querySelector('.answer_p');
@@ -946,6 +977,7 @@
       const text = richTextOnly(content);
       if (letter && (text || hasRichContent(content))) return { letter, text, content };
     }
+    return null;
     return null;
   }
 
@@ -971,7 +1003,8 @@
     return '';
   }
 
-  function isAnswerWrong(qLi, myAnswer, correctAnswer) {
+  function isAnswerWrong(qLi, myAnswer, correctAnswer, qtype) {
+    if (qtype === '简答') return false; // 简答题不纳入错题统计
     if (!myAnswer) return false; // 没有我的答案，不算错题
     if (!correctAnswer) return false;
     return myAnswer.trim() !== correctAnswer.trim();
@@ -991,123 +1024,144 @@
     return shuffled;
   }
 
-  function extractImagesFromElement(el) {
-    const imgs = el.querySelectorAll('img');
-    return Array.from(imgs)
-      .map(img => img.src || img.getAttribute('data-src') || '')
-      .filter(url => url && url.length > 0);
+  function extract() {
+    // 优先从当前文档提取
+    const topResult = extractFromRoot(document);
+    if (hasQuestions(topResult)) return topResult;
+
+    // 学生学习页面：题目在多层嵌套 iframe 中，递归查找
+    const iframeResult = extractFromIframesRecursive(document);
+    if (iframeResult) return iframeResult;
+
+    // 兜底：返回空结果
+    return { results: { '单选': [], '多选': [], '填空': [], '判断': [], '简答': [] }, typeOrder: [], wrongCount: 0, hasMyAnswer: false, hasCorrectAnswer: false };
   }
 
-  function extract() {
+  // 检查提取结果是否包含题目
+  function hasQuestions(result) {
+    return Object.values(result.results).some(arr => arr.length > 0);
+  }
+
+  // 从指定文档/根节点提取题目（支持 .mark_item 和 .questionLi 两种结构，富文本版本）
+  function extractFromRoot(root) {
     const results = { '单选': [], '多选': [], '填空': [], '判断': [], '简答': [] };
     const typeOrder = [];
-    let wrongCount = 0;
 
-    const markItems = document.querySelectorAll('.mark_item');
+    // 优先 .mark_item 结构（带答案的作业详情页）
+    const markItems = root.querySelectorAll('.mark_item');
+    if (markItems.length > 0) {
+      let wrongCount = 0;
+      let hasAnyMyAnswer = false;
+      let hasCorrectAnswer = false;
 
-    // 新版页面：没有 .mark_item，直接通过 .questionLi 的 typeName 属性提取
-    if (markItems.length === 0) {
-      return extractFromQuestionLi(results, typeOrder);
+      markItems.forEach(markItem => {
+        const typeTit = markItem.querySelector('.type_tit');
+        if (!typeTit) return;
+        const sectionType = detectTypeFromText(typeTit.textContent || '');
+        if (!sectionType) return;
+
+        if (!typeOrder.includes(sectionType)) typeOrder.push(sectionType);
+
+        const questionLis = markItem.querySelectorAll('.questionLi');
+        questionLis.forEach(qLi => {
+          const qtContent = qLi.querySelector('.qtContent');
+          if (!qtContent) return;
+          // 富文本提取题干
+          const stemContent = stripQuestionPrefix(extractRichContent(qtContent));
+          if (!hasRichContent(stemContent)) return;
+          const stem = formatRichForText(stemContent);
+
+          const options = [];
+          const markLetter = qLi.querySelector('.mark_letter');
+          if (markLetter) {
+            markLetter.querySelectorAll('li').forEach((li, i) => {
+              const opt = extractOptionFromLegacyLi(li, i);
+              if (opt) options.push(opt);
+            });
+          }
+
+          const correctAnswerContent = extractCorrectAnswerContent(qLi);
+          const correctAnswer = richContentToText(correctAnswerContent, () => '').replace(/\s+/g, ' ').trim();
+          const myAnswer = extractMyAnswer(qLi, sectionType);
+          if (myAnswer) hasAnyMyAnswer = true;
+          if (correctAnswer) hasCorrectAnswer = true;
+          const wrong = isAnswerWrong(qLi, myAnswer, correctAnswer, sectionType);
+          if (wrong) wrongCount++;
+
+          results[sectionType].push({
+            stem, stemContent,
+            options, correctAnswer, correctAnswerContent,
+            myAnswer, isWrong: wrong
+          });
+        });
+      });
+
+      return { results, typeOrder, wrongCount, hasMyAnswer: hasAnyMyAnswer, hasCorrectAnswer };
     }
 
-    let hasAnyMyAnswer = false;
-
-    markItems.forEach(markItem => {
-      const typeTit = markItem.querySelector('.type_tit');
-      if (!typeTit) return;
-      const sectionType = detectTypeFromText(typeTit.textContent || '');
-      if (!sectionType) return;
-
-      if (!typeOrder.includes(sectionType)) typeOrder.push(sectionType);
-
-      const questionLis = markItem.querySelectorAll('.questionLi');
+    // 新版页面 .questionLi 结构（学习页面，通常无答案）
+    const questionLis = root.querySelectorAll('.questionLi');
+    if (questionLis.length > 0) {
       questionLis.forEach(qLi => {
-        const qtContent = qLi.querySelector('.qtContent');
-        if (!qtContent) return;
-        const stemContent = extractRichContent(qtContent);
-        let stem = richTextOnly(stemContent);
-        if (!stem && !hasRichContent(stemContent)) return;
+        const typeName = qLi.getAttribute('typeName') || '';
+        const sectionType = detectTypeFromText(typeName);
+        if (!sectionType) return;
 
-        // 提取题目中的图片 URL
-        const images = stemContent.filter(part => part.type === 'image').map(part => part.url);
+        if (!typeOrder.includes(sectionType)) typeOrder.push(sectionType);
 
-        const options = [];
-        const markLetter = qLi.querySelector('.mark_letter');
-        if (markLetter) {
-          markLetter.querySelectorAll('li').forEach((li, index) => {
-            const option = extractOptionFromLegacyLi(li, index);
-            if (option) options.push(option);
-          });
-        }
-
-        const correctAnswerContent = extractCorrectAnswerContent(qLi);
-        const correctAnswer = richTextOnly(correctAnswerContent);
-        const myAnswer = extractMyAnswer(qLi, sectionType);
-        if (myAnswer) hasAnyMyAnswer = true;
-        const wrong = isAnswerWrong(qLi, myAnswer, correctAnswer);
-        if (wrong) wrongCount++;
-
-        results[sectionType].push({ stem, stemContent, options, images, correctAnswer, correctAnswerContent, myAnswer, isWrong: wrong });
+        const qData = extractFromQuestionLi(qLi, sectionType);
+        if (qData) results[sectionType].push(qData);
       });
+
+      return { results, typeOrder, wrongCount: 0, hasMyAnswer: false, hasCorrectAnswer: false };
+    }
+
+    return { results, typeOrder, wrongCount: 0, hasMyAnswer: false, hasCorrectAnswer: false };
+  }
+
+  // 从单个 .questionLi 提取题目（富文本版本）
+  function extractFromQuestionLi(qLi, sectionType) {
+    const markName = qLi.querySelector('.mark_name');
+    if (!markName) return null;
+    const stemContent = stripQuestionPrefix(extractRichContent(markName));
+    if (!hasRichContent(stemContent)) return null;
+    const stem = formatRichForText(stemContent);
+
+    const options = [];
+    const answerBgs = qLi.querySelectorAll('.answerBg');
+    answerBgs.forEach((bg, i) => {
+      const opt = extractOptionFromAnswerBg(bg, i);
+      if (opt) options.push(opt);
     });
+    options.sort((a, b) => a.letter.localeCompare(b.letter));
 
-    return { results, typeOrder, wrongCount, hasMyAnswer: hasAnyMyAnswer };
+    return {
+      stem, stemContent, options,
+      correctAnswer: '', correctAnswerContent: [],
+      myAnswer: '', isWrong: false
+    };
   }
 
-  // 新版本页面提取：无 .mark_item，直接遍历 .questionLi
-  function extractFromQuestionLi(results, typeOrder) {
-    const questionLis = document.querySelectorAll('.questionLi');
-    if (questionLis.length === 0) return { results, typeOrder, wrongCount: 0, hasMyAnswer: false };
+  // 递归遍历所有 iframe（含嵌套 iframe）查找题目
+  function extractFromIframesRecursive(root) {
+    const iframes = root.querySelectorAll('iframe');
+    for (const iframe of iframes) {
+      let doc;
+      try {
+        doc = iframe.contentDocument || (iframe.contentWindow && iframe.contentWindow.document);
+      } catch (e) { continue; }
+      if (!doc) continue;
 
-    questionLis.forEach(qLi => {
-      // 从 typeName 属性获取题型
-      const typeName = qLi.getAttribute('typeName') || '';
-      const sectionType = detectTypeFromText(typeName);
-      if (!sectionType) return;
+      const result = extractFromRoot(doc);
+      if (hasQuestions(result)) return result;
 
-      if (!typeOrder.includes(sectionType)) typeOrder.push(sectionType);
-
-      // 从 h3.mark_name 提取题干
-      const markName = qLi.querySelector('.mark_name');
-      if (!markName) return;
-      const stemContent = stripQuestionPrefix(extractRichContent(markName));
-      let stem = richTextOnly(stemContent);
-      if (!stem && !hasRichContent(stemContent)) return;
-
-      // 提取题目中的图片
-      const images = stemContent.filter(part => part.type === 'image').map(part => part.url);
-
-      // 从 .answerBg 提取选项，按字母顺序排列
-      const options = [];
-      const answerBgs = qLi.querySelectorAll('.answerBg');
-      answerBgs.forEach((bg, index) => {
-        const option = extractOptionFromAnswerBg(bg, index);
-        if (option) options.push(option);
-      });
-      // 按字母顺序排序（data 属性存真实字母，DOM 顺序已被打乱）
-      options.sort((a, b) => a.letter.localeCompare(b.letter));
-
-      // 新版本页面无正确答案/我的答案
-      results[sectionType].push({
-        stem, stemContent, options, images,
-        correctAnswer: '', correctAnswerContent: [], myAnswer: '', isWrong: false
-      });
-    });
-
-    return { results, typeOrder, wrongCount: 0, hasMyAnswer: false };
+      const nested = extractFromIframesRecursive(doc);
+      if (nested) return nested;
+    }
+    return null;
   }
 
-  // ==================== TXT 格式化 ====================
-  function formatImagesForText(images) {
-    if (!images || images.length === 0) return '';
-    return images.map(url => `\n[图片: ${url}]`).join('');
-  }
-
-  function formatImagesForMD(images) {
-    if (!images || images.length === 0) return '';
-    return images.map((url, i) => `\n![图片${images.length > 1 ? i + 1 : ''}](${url})`).join('');
-  }
-
+  // ==================== TXT 格式化（富文本） ====================
   function formatOutput(results, typeOrder) {
     const typeLabels = {
       '单选': '单选题', '多选': '多选题', '填空': '填空题',
@@ -1130,8 +1184,10 @@
       for (const q of questions) {
         globalNum++;
         output += `${globalNum}. ${formatRichForText(questionContent(q))}\n`;
+        output += `${globalNum}. ${formatRichForText(questionContent(q))}\n`;
         if (q.options && q.options.length > 0) {
           for (const opt of q.options) {
+            output += `${opt.letter}. ${formatRichForText(optionContent(opt))}\n`;
             output += `${opt.letter}. ${formatRichForText(optionContent(opt))}\n`;
           }
         }
@@ -1159,8 +1215,7 @@
 
       for (const q of questions) {
         globalNum++;
-        const answerContentValue = answerContent(q);
-        const answer = hasRichContent(answerContentValue) ? formatRichForText(answerContentValue) : '（未找到答案）';
+        const answer = formatRichForText(answerContent(q)) || '（未找到答案）';
         if (qtype === '填空' && answer.includes('；')) {
           const parts = answer.split('；').map(p => p.trim().replace(/^\(\d+\)\s*/, ''));
           output += `${globalNum}. \n`;
@@ -1201,15 +1256,15 @@
         if (!q.isWrong) continue;
         const typeLabel = qtype === '填空' ? '填空题' : '题目';
         output += `${globalNum}. (${typeLabel})${formatRichForText(questionContent(q))}\n`;
+        output += `${globalNum}. (${typeLabel})${formatRichForText(questionContent(q))}\n`;
         output += `   我的答案: ${q.myAnswer || '无'}\n`;
-        const answer = hasRichContent(answerContent(q)) ? formatRichForText(answerContent(q)) : '（未找到答案）';
-        output += `   正确答案: ${answer}\n\n`;
+        output += `   正确答案: ${formatRichForText(answerContent(q)) || '（未找到答案）'}\n\n`;
       }
     }
     return output.replace(/\n+$/, '');
   }
 
-  // ==================== Markdown 格式化 ====================
+  // ==================== Markdown 格式化（富文本） ====================
   function formatOutputMD(results, typeOrder) {
     const typeLabels = {
       '单选': '单选题', '多选': '多选题', '填空': '填空题',
@@ -1232,8 +1287,10 @@
       for (const q of questions) {
         globalNum++;
         output += `**${globalNum}.** ${formatRichForMD(questionContent(q))}\n\n`;
+        output += `**${globalNum}.** ${formatRichForMD(questionContent(q))}\n\n`;
         if (q.options && q.options.length > 0) {
           for (const opt of q.options) {
+            output += `- ${opt.letter}. ${formatRichForMD(optionContent(opt))}\n`;
             output += `- ${opt.letter}. ${formatRichForMD(optionContent(opt))}\n`;
           }
           output += '\n';
@@ -1256,8 +1313,7 @@
       output += `**${typeLabels[qtype]}**\n\n`;
       for (const q of questions) {
         globalNum++;
-        const answerContentValue = answerContent(q);
-        const answer = hasRichContent(answerContentValue) ? formatRichForMD(answerContentValue) : '（未找到答案）';
+        const answer = formatRichForMD(answerContent(q)) || '（未找到答案）';
         if (qtype === '填空' && answer.includes('；')) {
           const parts = answer.split('；').map(p => p.trim().replace(/^\(\d+\)\s*/, ''));
           output += `${globalNum}.  \n`;
@@ -1293,27 +1349,22 @@
         globalNum++;
         if (!q.isWrong) continue;
         output += `**${globalNum}.** ${formatRichForMD(questionContent(q))}\n\n`;
+        output += `**${globalNum}.** ${formatRichForMD(questionContent(q))}\n\n`;
         output += `- 我的答案: ${q.myAnswer || '无'}\n`;
-        const answer = hasRichContent(answerContent(q)) ? formatRichForMD(answerContent(q)) : '（未找到答案）';
-        output += `- 正确答案: ${answer}\n\n`;
+        output += `- 正确答案: ${formatRichForMD(answerContent(q)) || '（未找到答案）'}\n\n`;
       }
     }
     return output.replace(/\n+$/, '');
   }
 
-  // ==================== Word 文档生成（纯前端） ====================
-  function normalizeStem(stem) {
-    return stem.replace(/\(\s{3,}\)/g, '(   )');
-  }
-
-  // 题库导入格式：将题干中的宽括号归一化为（ ）
-  function normalizeStemForBank(stem) {
-    return stem.replace(/\(\s{2,}\)/g, '（ ）').replace(/（\s{2,}）/g, '（ ）');
-  }
-
+  // ==================== Word 文档生成（富文本） ====================
   async function fetchImageAsset(url) {
+    if (!url) return null;
     try {
-      const resp = await fetch(url, { mode: 'cors' });
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 10000);
+      const resp = await fetch(url, { mode: 'cors', signal: controller.signal });
+      clearTimeout(timeoutId);
       if (!resp.ok) return null;
       const blob = await resp.blob();
       if (!blob.type.startsWith('image/')) return null;
@@ -1338,71 +1389,43 @@
     }
   }
 
+  async function buildImageRun(url) {
+    if (!url) return null;
+    const base64 = await fetchImageAsset(url);
+    if (base64) {
+      return new docx.ImageRun({
+        data: base64,
+        transformation: { width: 300, height: 200 },
+        type: 'png'
+      });
+    }
+    return null;
+  }
+
+  async function buildRichRuns(content, prefix = '') {
+    const { TextRun } = docx;
+    const runs = [];
+    if (prefix) runs.push(new TextRun({ text: prefix, font: "宋体", size: 24 }));
+    for (const part of content || []) {
+      if (part.type === 'text') {
+        const normalized = part.text.replace(/\n+/g, ' ');
+        if (normalized) runs.push(new TextRun({ text: normalized, font: "宋体", size: 24 }));
+      } else if (part.type === 'image') {
+        if (runs.length > 0) runs.push(new TextRun({ text: ' ', font: "宋体", size: 24 }));
+        const imgRun = await buildImageRun(part.url);
+        if (imgRun) runs.push(imgRun);
+        runs.push(new TextRun({ text: ' ', font: "宋体", size: 24 }));
+      } else if (part.type === 'break') {
+        runs.push(new TextRun({ text: '\n', break: 1, font: "宋体", size: 24 }));
+      }
+    }
+    return runs.length ? runs : [new TextRun({ text: prefix, font: "宋体", size: 24 })];
+  }
+
   async function generateWordBlob(results, typeOrder, title, withAnswers, withWrong, bankImport) {
     const { Document, Packer, Paragraph, TextRun, ImageRun,
             AlignmentType, convertMillimetersToTwip,
             TabStopType, PageBreak } = docx;
-
-    async function buildImageRun(url) {
-      const image = await fetchImageAsset(url);
-      if (!image) {
-        return new TextRun({ text: `[图片: ${url}]`, font: "宋体", size: 20, italics: true, color: "888888" });
-      }
-      const maxW = 520;
-      const maxH = 320;
-      const ratio = Math.min(maxW / image.width, maxH / image.height, 1);
-      return new ImageRun({
-        data: image.data,
-        transformation: {
-          width: Math.max(1, Math.round(image.width * ratio)),
-          height: Math.max(1, Math.round(image.height * ratio))
-        },
-        type: image.type
-      });
-    }
-
-    async function buildRichRuns(content, prefix = '') {
-      const runs = [];
-      if (prefix) runs.push(new TextRun({ text: prefix, font: "宋体", size: 24 }));
-      for (const part of content || []) {
-        if (part.type === 'text') {
-          const normalized = part.text.replace(/\n+/g, ' ');
-          if (normalized) runs.push(new TextRun({ text: normalized, font: "宋体", size: 24 }));
-        } else if (part.type === 'image') {
-          if (runs.length > 0) runs.push(new TextRun({ text: ' ', font: "宋体", size: 24 }));
-          runs.push(await buildImageRun(part.url));
-          runs.push(new TextRun({ text: ' ', font: "宋体", size: 24 }));
-        } else if (part.type === 'break') {
-          runs.push(new TextRun({ text: '\n', break: 1, font: "宋体", size: 24 }));
-        }
-      }
-      return runs.length ? runs : [new TextRun({ text: prefix, font: "宋体", size: 24 })];
-    }
-
-    async function buildRichParagraphs(content, prefix = '', spacingAfter = 40) {
-      return [new Paragraph({
-        children: await buildRichRuns(content, prefix),
-        spacing: { after: spacingAfter }
-      })];
-    }
-
-    async function buildImageParagraphs(images) {
-      const paragraphs = [];
-      if (!images || images.length === 0) return paragraphs;
-      for (const url of images) {
-        paragraphs.push(new Paragraph({
-          children: [await buildImageRun(url)],
-          spacing: { after: 80 }
-        }));
-      }
-      return paragraphs;
-    }
-
-    function normalizedQuestionContent(q) {
-      return normalizeRichContent(questionContent(q).map(part => (
-        part.type === 'text' ? { ...part, text: normalizeStem(part.text) } : part
-      )));
-    }
 
     const typeHeaders = {
       '单选': '一、单项选择题', '多选': '二、多项选择题',
@@ -1410,7 +1433,6 @@
       '简答': '五、简答题',
     };
 
-    // 题库导入格式标签
     const bankTypeLabels = {
       '单选': '【单选题】', '多选': '【多选题】', '填空': '【填空题】',
       '判断': '【判断题】', '简答': '【简答题】',
@@ -1423,7 +1445,7 @@
         children: [new TextRun({ text: title || '题库导入', font: "宋体", size: 32, bold: true, color: "000000" })],
         alignment: AlignmentType.CENTER,
         spacing: { after: 240 }
-      }))
+      }));
 
       let qNum = 0;
 
@@ -1436,25 +1458,41 @@
         for (const q of questions) {
           qNum++;
           // 题干（题号 + 题型标签 + 题干内容），括号归一化
-          const bankStemContent = normalizeRichContent(questionContent(q).map(part => (
-            part.type === 'text' ? { ...part, text: normalizeStemForBank(part.text) } : part
-          )));
-          children.push(...await buildRichParagraphs(bankStemContent, `${qNum}.${prefix}`, 40));
+          const stemText = formatRichForText(questionContent(q));
+          const stem = prefix + stemText.replace(/\(\s{2,}\)/g, '（ ）').replace(/（\s{2,}）/g, '（ ）');
+          children.push(new Paragraph({
+            children: [new TextRun({ text: `${qNum}.${stem}`, font: "宋体", size: 24 })],
+            spacing: { after: 40 }
+          }));
+          // 题干中的图片
+          const stemContent = questionContent(q);
+          for (const part of stemContent) {
+            if (part.type === 'image') {
+              const imgRun = await buildImageRun(part.url);
+              if (imgRun) {
+                children.push(new Paragraph({
+                  children: [imgRun],
+                  spacing: { after: 80 }
+                }));
+              }
+            }
+          }
 
           // 选项
           const options = q.options || [];
           for (const opt of options) {
-            children.push(...await buildRichParagraphs(optionContent(opt), `${opt.letter}. `, 40));
+            const runs = await buildRichRuns(optionContent(opt), `${opt.letter}. `);
+            children.push(new Paragraph({
+              children: runs,
+              spacing: { after: 40 }
+            }));
           }
 
           // 答案
-          const answerParts = answerContent(q);
-          const answer = richTextOnly(answerParts);
-          if (hasRichContent(answerParts)) {
-            const hasAnswerImage = answerParts.some(part => part.type === 'image');
-            let formattedAnswerParts = answerParts;
-            // 题库导入只对纯文本的客观题答案做格式归一；图文混排答案必须保留原内容，避免公式图片丢失。
-            if (!hasAnswerImage && qtype === '多选') {
+          const answer = formatRichForText(answerContent(q)).trim();
+          if (answer) {
+            let formattedAnswer = answer;
+            if (qtype === '多选') {
               const parts = answer.replace(/\s+/g, '').split('');
               formattedAnswerParts = [{ type: 'text', text: parts.join('，') }];
             } else if (!hasAnswerImage && qtype === '判断') {
@@ -1518,46 +1556,69 @@
 
       for (const q of questions) {
         qNum++;
+        const stemContent = questionContent(q);
 
         if (qtype === '单选' || qtype === '多选') {
-          children.push(...await buildRichParagraphs(normalizedQuestionContent(q), `${qNum}. `, 40));
+          children.push(new Paragraph({
+            children: await buildRichRuns(stemContent, `${qNum}. `),
+            spacing: { after: 40 }
+          }));
           const options = q.options || [];
           if (options.length > 0) {
-            // 判断是否需要竖排：任意选项超过 25 字或包含图片/换行则改为 1 列
-            const maxLen = Math.max(...options.map(o => o.text.length));
-            const useVertical = maxLen > 25 || options.some(o => (optionContent(o) || []).some(part => part.type === 'image' || part.type === 'break'));
+            const maxLen = Math.max(...options.map(o => (o.text || '').length));
+            const useVertical = maxLen > 25;
 
             if (useVertical) {
               for (const opt of options) {
-                children.push(...await buildRichParagraphs(optionContent(opt), `${opt.letter}. `, 40));
+                children.push(new Paragraph({
+                  children: await buildRichRuns(optionContent(opt), `${opt.letter}. `),
+                  spacing: { after: 40 }
+                }));
               }
             } else {
               for (let i = 0; i < options.length; i += 2) {
                 const left = options[i];
                 const right = options[i + 1];
-                let text = `${left.letter}. ${left.text}`;
-                if (right) text += `\t${right.letter}. ${right.text}`;
-                children.push(new Paragraph({
-                  children: [new TextRun({ text, font: "宋体", size: 24 })],
-                  tabStops: [{ type: TabStopType.LEFT, position: 4500 }],
-                  spacing: { after: 40 }
-                }));
+                const leftRuns = await buildRichRuns(optionContent(left), `${left.letter}. `);
+                if (right) {
+                  const rightRuns = await buildRichRuns(optionContent(right), `${right.letter}. `);
+                  const tabRun = new TextRun({ text: '\t', font: "宋体", size: 24 });
+                  children.push(new Paragraph({
+                    children: [...leftRuns, tabRun, ...rightRuns],
+                    tabStops: [{ type: TabStopType.LEFT, position: 4500 }],
+                    spacing: { after: 40 }
+                  }));
+                } else {
+                  children.push(new Paragraph({
+                    children: leftRuns,
+                    spacing: { after: 40 }
+                  }));
+                }
               }
             }
             children.push(new Paragraph({ children: [], spacing: { after: 80 } }));
           }
         } else if (qtype === '填空') {
-          children.push(...await buildRichParagraphs(normalizedQuestionContent(q), `${qNum}. `, 40));
+          children.push(new Paragraph({
+            children: await buildRichRuns(stemContent, `${qNum}. `),
+            spacing: { after: 40 }
+          }));
           children.push(new Paragraph({ children: [], spacing: { after: 120 } }));
         } else if (qtype === '判断') {
           children.push(...await buildRichParagraphs(normalizedQuestionContent(q), `${qNum}. `, 40));
           children.push(new Paragraph({
-            children: [new TextRun({ text: '( )', font: "宋体", size: 24 })],
+            children: await buildRichRuns(stemContent, `${qNum}. `),
             spacing: { after: 40 }
           }));
-          children.push(new Paragraph({ children: [], spacing: { after: 120 } }));
+          children.push(new Paragraph({
+            children: [new TextRun({ text: '( )', font: "宋体", size: 24 })],
+            spacing: { after: 120 }
+          }));
         } else if (qtype === '简答') {
-          children.push(...await buildRichParagraphs(normalizedQuestionContent(q), `${qNum}. `, 40));
+          children.push(new Paragraph({
+            children: await buildRichRuns(stemContent, `${qNum}. `),
+            spacing: { after: 40 }
+          }));
           for (let i = 0; i < 8; i++) {
             children.push(new Paragraph({
               children: [new TextRun({ text: '', font: "宋体", size: 24 })],
@@ -1571,7 +1632,6 @@
 
     // 答案页
     if (withAnswers) {
-      // 分页符
       children.push(new Paragraph({
         children: [new PageBreak()],
         spacing: { after: 0 }
@@ -1592,20 +1652,20 @@
         }));
         for (const q of questions) {
           aNum++;
-          const content = answerContent(q);
-          if (hasRichContent(content)) {
-            children.push(...await buildRichParagraphs(content, `${aNum}. `, 60));
-          } else {
-            children.push(new Paragraph({
-              children: [new TextRun({ text: `${aNum}. （未找到答案）`, font: "宋体", size: 24 })],
-              spacing: { after: 60 }
-            }));
+          const answerContent = answerContent(q);
+          const answerRuns = await buildRichRuns(answerContent);
+          if (answerRuns.length === 0) {
+            answerRuns.push(new TextRun({ text: '（未找到答案）', font: "宋体", size: 24 }));
           }
+          children.push(new Paragraph({
+            children: [new TextRun({ text: `${aNum}. `, font: "宋体", size: 24 }), ...answerRuns],
+            spacing: { after: 60 }
+          }));
         }
       }
     }
 
-    // 错题汇总（Word 试卷）—— 保留原题号
+    // 错题汇总（Word 试卷）
     if (withWrong) {
       let hasWrong = false;
       for (const qtype of typeOrder) {
@@ -1649,31 +1709,31 @@
           for (const q of questions) {
             globalNum++;
             if (!q.isWrong) continue;
-            children.push(...await buildRichParagraphs(normalizedQuestionContent(q), `${globalNum}. `, 40));
-            // 选项
+            children.push(new Paragraph({
+              children: await buildRichRuns(questionContent(q), `${globalNum}. `),
+              spacing: { after: 40 }
+            }));
             const options = q.options || [];
             if (options.length > 0) {
               for (const opt of options) {
-                children.push(...await buildRichParagraphs(optionContent(opt), `${opt.letter}. `, 40));
+                children.push(new Paragraph({
+                  children: await buildRichRuns(optionContent(opt), `${opt.letter}. `),
+                  spacing: { after: 40 }
+                }));
               }
             }
             children.push(new Paragraph({
               children: [new TextRun({ text: `我的答案: ${q.myAnswer || '无'}`, font: "宋体", size: 24, color: "DC2626" })],
               spacing: { after: 40 }
             }));
-            const content = answerContent(q);
-            if (hasRichContent(content)) {
-              const answerRuns = await buildRichRuns(content, '正确答案: ');
-              children.push(new Paragraph({
-                children: answerRuns,
-                spacing: { after: 120 }
-              }));
-            } else {
-              children.push(new Paragraph({
-                children: [new TextRun({ text: '正确答案: （未找到答案）', font: "宋体", size: 24, color: "16A34A" })],
-                spacing: { after: 120 }
-              }));
+            const correctRuns = await buildRichRuns(answerContent(q));
+            if (correctRuns.length === 0) {
+              correctRuns.push(new TextRun({ text: '（未找到答案）', font: "宋体", size: 24, color: "16A34A" }));
             }
+            children.push(new Paragraph({
+              children: [new TextRun({ text: '正确答案: ', font: "宋体", size: 24, color: "16A34A" }), ...correctRuns],
+              spacing: { after: 120 }
+            }));
           }
         }
       }
@@ -1701,9 +1761,13 @@
   // ==================== UI 创建 ====================
   let extractedData = null;
 
+  let _creatingPanel = false;
+
   function createPanel() {
+    if (_creatingPanel) return;
     if (document.getElementById('xxt-panel-btn')) return;
 
+    _creatingPanel = true;
     if (observer) { observer.disconnect(); observer = null; }
 
     const btn = document.createElement('button');
@@ -2016,9 +2080,10 @@
           const typeOrder = entry.typeOrder;
           const results = entry.results;
           const total = entry.totalQuestions;
+          const hasCorrectAnswer = entry.hasCorrectAnswer !== false;
           extractedData = {
             total, title: entry.title, typeOrder, results,
-            wrongCount: entry.wrongCount, hasMyAnswer: entry.hasMyAnswer,
+            wrongCount: entry.wrongCount, hasMyAnswer: entry.hasMyAnswer, hasCorrectAnswer,
             breakdown: Object.fromEntries(Object.entries(results).map(([k, v]) => [k, v.length])),
             text: formatOutput(results, typeOrder),
             textWithAnswers: formatOutputWithAnswers(results, typeOrder),
@@ -2031,7 +2096,12 @@
           const fmtRadio = document.querySelector(`input[name="xxt-fmt"][value="${entry.format}"]`);
           if (fmtRadio) fmtRadio.checked = true;
           // 恢复复选框
-          els.chkAnswers.checked = entry.withAnswers;
+          if (els.chkAnswers) {
+            els.chkAnswers.checked = hasCorrectAnswer ? entry.withAnswers : false;
+            els.chkAnswers.disabled = !hasCorrectAnswer;
+          }
+          const ansToggle = document.getElementById('xxt-ans-toggle');
+          if (ansToggle) ansToggle.classList.toggle('xxt-disabled', !hasCorrectAnswer);
           if (els.chkShuffle) els.chkShuffle.checked = entry.shuffle;
           if (els.chkWrong) els.chkWrong.checked = entry.withWrong;
           if (els.chkBankImport) els.chkBankImport.checked = entry.bankImport || false;
@@ -2043,17 +2113,21 @@
           if (els.bankImportToggle) els.bankImportToggle.style.display = isWord ? '' : 'none';
           // 题库导入格式：勾选时禁用打乱和答案选项（不隐藏，维持高度稳定）
           const isBankImport = entry.bankImport || false;
-          const ansToggle = document.getElementById('xxt-ans-toggle');
           const shuffleToggle = document.getElementById('xxt-shuffle-toggle');
           if (ansToggle) {
-            ansToggle.classList.toggle('xxt-disabled', isBankImport);
-            if (ansToggle.querySelector('input')) ansToggle.querySelector('input').disabled = isBankImport;
+            ansToggle.classList.toggle('xxt-disabled', isBankImport || !hasCorrectAnswer);
+            if (ansToggle.querySelector('input')) ansToggle.querySelector('input').disabled = isBankImport || !hasCorrectAnswer;
           }
           if (shuffleToggle) {
             shuffleToggle.classList.toggle('xxt-disabled', isBankImport);
             if (shuffleToggle.querySelector('input')) shuffleToggle.querySelector('input').disabled = isBankImport;
           }
-          if (entry.hasMyAnswer && entry.wrongCount > 0) {
+          if (els.wrongToggle) {
+            els.wrongToggle.classList.toggle('xxt-disabled', isBankImport);
+            if (els.wrongToggle.querySelector('input')) els.wrongToggle.querySelector('input').disabled = isBankImport;
+          }
+          // 题库导入格式下，错题提示不显示（选项已禁用）
+          if (entry.hasMyAnswer && entry.wrongCount > 0 && !isBankImport) {
             els.wrongToggle.classList.remove('xxt-hidden');
             els.wrongHint.textContent = `检测到 ${entry.wrongCount} 道错题，可勾选附加到输出末尾`;
             els.wrongHint.classList.remove('xxt-hidden');
@@ -2117,19 +2191,26 @@
       if (e.target === els.chkBankImport) {
         updateFilename(els);
         const checked = els.chkBankImport.checked;
+        const hasCorrectAnswer = extractedData.hasCorrectAnswer !== false;
         const ansToggle = document.getElementById('xxt-ans-toggle');
         const shuffleToggle = document.getElementById('xxt-shuffle-toggle');
+        const wrongToggle = document.getElementById('xxt-wrong-toggle');
         if (ansToggle) {
-          ansToggle.classList.toggle('xxt-disabled', checked);
-          if (ansToggle.querySelector('input')) ansToggle.querySelector('input').disabled = checked;
+          ansToggle.classList.toggle('xxt-disabled', checked || !hasCorrectAnswer);
+          if (ansToggle.querySelector('input')) ansToggle.querySelector('input').disabled = checked || !hasCorrectAnswer;
         }
         if (shuffleToggle) {
           shuffleToggle.classList.toggle('xxt-disabled', checked);
           if (shuffleToggle.querySelector('input')) shuffleToggle.querySelector('input').disabled = checked;
         }
+        if (wrongToggle) {
+          wrongToggle.classList.toggle('xxt-disabled', checked);
+          if (wrongToggle.querySelector('input')) wrongToggle.querySelector('input').disabled = checked;
+        }
         if (checked) {
           if (els.chkAnswers) els.chkAnswers.checked = false;
           if (els.chkShuffle) els.chkShuffle.checked = false;
+          if (els.chkWrong) els.chkWrong.checked = false;
         }
       }
       // 勾选/取消附加答案时更新文件名
@@ -2144,7 +2225,7 @@
       els.status.className = 'xxt-hidden';
       els.result.classList.add('xxt-hidden');
 
-      const { results, typeOrder, wrongCount, hasMyAnswer } = extract();
+      const { results, typeOrder, wrongCount, hasMyAnswer, hasCorrectAnswer } = extract();
       const total = Object.values(results).reduce((s, a) => s + a.length, 0);
 
       if (total === 0) {
@@ -2158,7 +2239,7 @@
       const title = titleEl ? titleEl.textContent.trim() : '';
 
       extractedData = {
-        total, title, typeOrder, results, wrongCount, hasMyAnswer,
+        total, title, typeOrder, results, wrongCount, hasMyAnswer, hasCorrectAnswer,
         breakdown: Object.fromEntries(Object.entries(results).map(([k, v]) => [k, v.length])),
         text: formatOutput(results, typeOrder),
         textWithAnswers: formatOutputWithAnswers(results, typeOrder),
@@ -2172,8 +2253,17 @@
       updateFilename(els);
       els.result.classList.remove('xxt-hidden');
 
-      // 错题按钮逻辑
-      if (hasMyAnswer && wrongCount > 0) {
+      // 没有正确答案时禁用“附加答案”
+      if (els.chkAnswers) {
+        els.chkAnswers.checked = hasCorrectAnswer ? els.chkAnswers.checked : false;
+        els.chkAnswers.disabled = !hasCorrectAnswer;
+      }
+      const ansToggle = document.getElementById('xxt-ans-toggle');
+      if (ansToggle) ansToggle.classList.toggle('xxt-disabled', !hasCorrectAnswer);
+
+      // 错题按钮逻辑（题库导入格式下不显示）
+      const isBankImport = els.chkBankImport && els.chkBankImport.checked;
+      if (hasMyAnswer && wrongCount > 0 && !isBankImport) {
         els.wrongToggle.classList.remove('xxt-hidden');
         els.wrongHint.textContent = `检测到 ${wrongCount} 道错题，可勾选附加到输出末尾`;
         els.wrongHint.classList.remove('xxt-hidden');
@@ -2255,6 +2345,7 @@
       }
       showStatus(els, '已复制到剪贴板', 'ok');
     });
+    _creatingPanel = false;
   }
 
   function getFormat(els) {
